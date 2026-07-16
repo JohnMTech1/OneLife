@@ -13394,6 +13394,16 @@ void LivingLifePage::step() {
         observation.heldObjectID =
             agentLiveObject->holdingID;
 
+        observation.heldObjectFoodValue = 0;
+        if( observation.heldObjectID > 0 ) {
+            ObjectRecord *heldObject =
+                getObject( observation.heldObjectID );
+            if( heldObject != NULL ) {
+                observation.heldObjectFoodValue =
+                    heldObject->foodValue;
+                }
+            }
+
         observation.foodStore =
             agentLiveObject->foodStore;
 
@@ -13458,6 +13468,81 @@ void LivingLifePage::step() {
                 visibleObject.distance =
                     abs( offsetX ) + abs( offsetY );
 
+
+                visibleObject.foodValue = 0;
+                visibleObject.pickupable = false;
+                visibleObject.emptyHandFoodResultID = 0;
+                visibleObject.requiredToolID = 0;
+                visibleObject.toolFoodResultID = 0;
+
+                ObjectRecord *visibleRecord = getObject( objectID );
+                if( visibleRecord != NULL ) {
+                    visibleObject.foodValue = visibleRecord->foodValue;
+                    visibleObject.pickupable =
+                        !visibleRecord->permanent &&
+                        canPickup( objectID, observation.age );
+                    }
+
+                TransRecord *bareTransition = getTrans( 0, objectID );
+                if( bareTransition != NULL ) {
+                    int resultIDs[2] = {
+                        bareTransition->newActor,
+                        bareTransition->newTarget
+                        };
+
+                    for( int r=0; r<2; r++ ) {
+                        if( resultIDs[r] <= 0 ) {
+                            continue;
+                            }
+                        ObjectRecord *result = getObject( resultIDs[r] );
+                        if( result != NULL && result->foodValue > 0 ) {
+                            visibleObject.emptyHandFoodResultID =
+                                resultIDs[r];
+                            break;
+                            }
+                        }
+                    }
+
+                SimpleVector<TransRecord*> *uses =
+                    getAllUses( objectID );
+                if( uses != NULL ) {
+                    for( int u=0; u<uses->size(); u++ ) {
+                        TransRecord *transition =
+                            uses->getElementDirect( u );
+
+                        if( transition == NULL ||
+                            transition->target != objectID ||
+                            transition->actor <= 0 ) {
+                            continue;
+                            }
+
+                        int resultIDs[2] = {
+                            transition->newActor,
+                            transition->newTarget
+                            };
+
+                        for( int r=0; r<2; r++ ) {
+                            if( resultIDs[r] <= 0 ) {
+                                continue;
+                                }
+                            ObjectRecord *result =
+                                getObject( resultIDs[r] );
+                            if( result != NULL &&
+                                result->foodValue > 0 ) {
+                                visibleObject.requiredToolID =
+                                    transition->actor;
+                                visibleObject.toolFoodResultID =
+                                    resultIDs[r];
+                                break;
+                                }
+                            }
+
+                        if( visibleObject.requiredToolID > 0 ) {
+                            break;
+                            }
+                        }
+                    }
+
                 observation.nearbyObjects.push_back(
                     visibleObject );
             }
@@ -13465,15 +13550,31 @@ void LivingLifePage::step() {
         basicAgent.observe( observation );
         AgentAction action = basicAgent.decide( observation );
 
-        if( action.type == AgentActionType::MOVE_TO &&
-            ! agentLiveObject->inMotion &&
-            ! playerActionPending &&
+        if( !agentLiveObject->inMotion &&
+            !playerActionPending &&
             computeCurrentAgeNoOverride( agentLiveObject ) >= noMoveAge ) {
 
-            mForceGroundClick = true;
-            pointerDown( action.targetX * CELL_D, action.targetY * CELL_D );
-            pointerUp( action.targetX * CELL_D, action.targetY * CELL_D );
-            mForceGroundClick = false;
+            if( action.type == AgentActionType::MOVE_TO ) {
+                mForceGroundClick = true;
+                pointerDown( action.targetX * CELL_D,
+                             action.targetY * CELL_D );
+                pointerUp( action.targetX * CELL_D,
+                           action.targetY * CELL_D );
+                mForceGroundClick = false;
+                }
+            else if( action.type == AgentActionType::INTERACT ||
+                     action.type == AgentActionType::DROP ) {
+                pointerDown( action.targetX * CELL_D,
+                             action.targetY * CELL_D );
+                pointerUp( action.targetX * CELL_D,
+                           action.targetY * CELL_D );
+                }
+            else if( action.type == AgentActionType::EAT ) {
+                pointerDown( observation.x * CELL_D,
+                             observation.y * CELL_D );
+                pointerUp( observation.x * CELL_D,
+                           observation.y * CELL_D );
+                }
             }
 
 

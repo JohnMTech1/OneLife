@@ -2,274 +2,371 @@
 #define BASIC_AGENT_INCLUDED
 
 #include <cstdio>
-#include <cstdlib>
 #include <vector>
 
-
 struct VisibleObject {
-
     int objectID;
     int x;
     int y;
     int distance;
+    int foodValue;
+    bool pickupable;
+    int emptyHandFoodResultID;
+    int requiredToolID;
+    int toolFoodResultID;
 };
 
-
 struct AgentObservation {
-
     int x;
     int y;
-
     int heldObjectID;
-
+    int heldObjectFoodValue;
     int foodStore;
     int foodCapacity;
-
     int maxFoodStore;
     int maxFoodCapacity;
-
     double age;
     double currentTime;
-
     bool inMotion;
-
     std::vector<VisibleObject> nearbyObjects;
 };
 
-
 enum class AgentActionType {
     NONE,
-    MOVE_TO
-    // future milestones:
-    // INTERACT,
-    // EAT,
-    // DROP
+    MOVE_TO,
+    INTERACT,
+    EAT,
+    DROP
 };
 
-
 struct AgentAction {
-
     AgentActionType type;
-
     int targetX;
     int targetY;
 };
 
-
 class BasicAgent {
-
     public:
-
         BasicAgent()
             : mEnabled( true ),
               mNextDebugTime( 0.0 ),
+              mLastActionTime( -100.0 ),
               mLastTargetX( 0 ),
-              mLastTargetY( 0 ),
-              mHasLastTarget( false ),
-              mLastTargetIssueTime( 0.0 ) {
+              mLastTargetY( 0 ) {
         }
-
 
         AgentAction decide( const AgentObservation &inObservation ) {
-
-            AgentAction action;
-            action.type = AgentActionType::NONE;
-            action.targetX = 0;
-            action.targetY = 0;
+            AgentAction none = makeAction( AgentActionType::NONE, 0, 0 );
 
             if( !mEnabled ) {
-                return action;
+                return none;
             }
 
             printDebug( inObservation );
 
-            if( inObservation.inMotion ) {
-                // still walking, don't interrupt ourselves
-                return action;
+            if( inObservation.inMotion ||
+                inObservation.currentTime - mLastActionTime < 0.35 ) {
+                return none;
             }
 
-            if( inObservation.nearbyObjects.empty() ) {
-                // nothing visible, nothing to do (yet)
-                return action;
+            bool hungry =
+                inObservation.foodStore <=
+                ( inObservation.foodCapacity * 2 ) / 3;
+
+            if( hungry ) {
+                if( inObservation.heldObjectID > 0 &&
+                    inObservation.heldObjectFoodValue > 0 ) {
+                    return issue( AgentActionType::EAT,
+                                  inObservation.x,
+                                  inObservation.y,
+                                  inObservation.currentTime,
+                                  "held food" );
+                }
+
+                const VisibleObject *looseFood =
+                    findNearestLooseFood( inObservation );
+
+                if( looseFood != NULL ) {
+                    if( inObservation.heldObjectID != 0 ) {
+                        return dropHeldObject( inObservation );
+                    }
+                    return approachOrInteract(
+                        *looseFood, inObservation.currentTime, "loose food" );
+                }
+
+                const VisibleObject *bareSource =
+                    findNearestBareHandSource( inObservation );
+
+                if( bareSource != NULL ) {
+                    if( inObservation.heldObjectID != 0 ) {
+                        return dropHeldObject( inObservation );
+                    }
+                    return approachOrInteract(
+                        *bareSource,
+                        inObservation.currentTime,
+                        "empty-hand food source" );
+                }
+
+                ToolPlan plan = findNearestToolPlan( inObservation );
+
+                if( plan.source != NULL &&
+                    inObservation.heldObjectID ==
+                    plan.source->requiredToolID ) {
+                    return approachOrInteract(
+                        *plan.source,
+                        inObservation.currentTime,
+                        "tool food source" );
+                }
+
+                if( plan.source != NULL && plan.tool != NULL ) {
+                    if( inObservation.heldObjectID != 0 ) {
+                        return dropHeldObject( inObservation );
+                    }
+                    return approachOrInteract(
+                        *plan.tool,
+                        inObservation.currentTime,
+                        "required food tool" );
+                }
             }
 
-            // target the nearest object we have NOT already reached
-            // (skip objects at distance <= 1 -- we're already adjacent
-            //  to those; milestone 4 will INTERACT with them instead)
-            const VisibleObject *nearest =
-                findNearestBeyond( inObservation, 1 );
+            const VisibleObject *wander = findWanderTarget( inObservation );
 
-            if( nearest == NULL ) {
-                // everything visible is already adjacent
-                return action;
+            if( wander != NULL ) {
+                return issue( AgentActionType::MOVE_TO,
+                              wander->x,
+                              wander->y,
+                              inObservation.currentTime,
+                              hungry ? "forage" : "explore" );
             }
 
-            if( mHasLastTarget &&
-                nearest->x == mLastTargetX &&
-                nearest->y == mLastTargetY &&
-                inObservation.currentTime - mLastTargetIssueTime < 5.0 ) {
-                // we recently issued a move to this exact target and
-                // we're stationary again without having reached it
-                // (unreachable, or path truncated)
-                // don't spam re-requests for 5 seconds
-                return action;
-            }
-
-            action.type = AgentActionType::MOVE_TO;
-            action.targetX = nearest->x;
-            action.targetY = nearest->y;
-
-            mLastTargetX = nearest->x;
-            mLastTargetY = nearest->y;
-            mHasLastTarget = true;
-            mLastTargetIssueTime = inObservation.currentTime;
-
-            printf(
-                "AGENT ACTION: MOVE_TO x=%d y=%d (target id=%d distance=%d)\n",
-                nearest->x,
-                nearest->y,
-                nearest->objectID,
-                nearest->distance );
-
-            return action;
+            return none;
         }
 
-
-        // kept for compatibility / passive observation
         void observe( const AgentObservation &inObservation ) {
-
-            if( !mEnabled ) {
-                return;
+            if( mEnabled ) {
+                printDebug( inObservation );
             }
-
-            printDebug( inObservation );
         }
-
 
         void setEnabled( bool inEnabled ) {
             mEnabled = inEnabled;
         }
 
-
-        // call on new life / rebirth so stale state doesn't
-        // suppress behavior in the next life
         void reset() {
             mNextDebugTime = 0.0;
-            mHasLastTarget = false;
+            mLastActionTime = -100.0;
             mLastTargetX = 0;
             mLastTargetY = 0;
-            mLastTargetIssueTime = 0.0;
         }
 
-
     private:
+        struct ToolPlan {
+            const VisibleObject *source;
+            const VisibleObject *tool;
+        };
 
         bool mEnabled;
         double mNextDebugTime;
-
+        double mLastActionTime;
         int mLastTargetX;
         int mLastTargetY;
-        bool mHasLastTarget;
-        double mLastTargetIssueTime;
 
+        AgentAction makeAction(
+            AgentActionType inType, int inX, int inY ) const {
+            AgentAction action;
+            action.type = inType;
+            action.targetX = inX;
+            action.targetY = inY;
+            return action;
+        }
 
-        const VisibleObject *findNearest(
-            const AgentObservation &inObservation ) {
+        AgentAction issue(
+            AgentActionType inType,
+            int inX,
+            int inY,
+            double inTime,
+            const char *inReason ) {
+            mLastActionTime = inTime;
+            mLastTargetX = inX;
+            mLastTargetY = inY;
 
-            if( inObservation.nearbyObjects.empty() ) {
-                return NULL;
+            std::printf(
+                "AGENT ACTION: %s x=%d y=%d reason=%s\n",
+                actionName( inType ), inX, inY, inReason );
+
+            return makeAction( inType, inX, inY );
+        }
+
+        AgentAction approachOrInteract(
+            const VisibleObject &inTarget,
+            double inTime,
+            const char *inReason ) {
+            if( inTarget.distance <= 1 ) {
+                return issue( AgentActionType::INTERACT,
+                              inTarget.x,
+                              inTarget.y,
+                              inTime,
+                              inReason );
             }
 
-            const VisibleObject *nearest =
-                &inObservation.nearbyObjects[0];
+            return issue( AgentActionType::MOVE_TO,
+                          inTarget.x,
+                          inTarget.y,
+                          inTime,
+                          inReason );
+        }
 
-            for( size_t i = 1;
-                 i < inObservation.nearbyObjects.size();
-                 i++ ) {
+        AgentAction dropHeldObject(
+            const AgentObservation &inObservation ) {
+            static const int offsets[4][2] = {
+                { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+            };
 
-                const VisibleObject &candidate =
-                    inObservation.nearbyObjects[i];
+            for( int i=0; i<4; i++ ) {
+                int x = inObservation.x + offsets[i][0];
+                int y = inObservation.y + offsets[i][1];
 
-                if( candidate.distance < nearest->distance ) {
-                    nearest = &candidate;
+                if( !hasObjectAt( inObservation, x, y ) ) {
+                    return issue( AgentActionType::DROP,
+                                  x,
+                                  y,
+                                  inObservation.currentTime,
+                                  "clear hand" );
                 }
             }
 
-            return nearest;
+            return makeAction( AgentActionType::NONE, 0, 0 );
         }
 
-
-        // nearest object with distance strictly greater than inMinDistance
-        // returns NULL if none qualify
-        const VisibleObject *findNearestBeyond(
+        bool hasObjectAt(
             const AgentObservation &inObservation,
-            int inMinDistance ) {
+            int inX,
+            int inY ) const {
+            for( size_t i=0; i<inObservation.nearbyObjects.size(); i++ ) {
+                const VisibleObject &o = inObservation.nearbyObjects[i];
+                if( o.x == inX && o.y == inY ) {
+                    return true;
+                }
+            }
+            return false;
+        }
 
-            const VisibleObject *nearest = NULL;
+        const VisibleObject *findNearestLooseFood(
+            const AgentObservation &inObservation ) const {
+            const VisibleObject *best = NULL;
 
-            for( size_t i = 0;
-                 i < inObservation.nearbyObjects.size();
-                 i++ ) {
+            for( size_t i=0; i<inObservation.nearbyObjects.size(); i++ ) {
+                const VisibleObject &o = inObservation.nearbyObjects[i];
+                if( o.foodValue > 0 && o.pickupable &&
+                    ( best == NULL || o.distance < best->distance ) ) {
+                    best = &o;
+                }
+            }
+            return best;
+        }
 
-                const VisibleObject &candidate =
+        const VisibleObject *findNearestBareHandSource(
+            const AgentObservation &inObservation ) const {
+            const VisibleObject *best = NULL;
+
+            for( size_t i=0; i<inObservation.nearbyObjects.size(); i++ ) {
+                const VisibleObject &o = inObservation.nearbyObjects[i];
+                if( o.emptyHandFoodResultID > 0 &&
+                    ( best == NULL || o.distance < best->distance ) ) {
+                    best = &o;
+                }
+            }
+            return best;
+        }
+
+        ToolPlan findNearestToolPlan(
+            const AgentObservation &inObservation ) const {
+            ToolPlan plan = { NULL, NULL };
+
+            for( size_t i=0; i<inObservation.nearbyObjects.size(); i++ ) {
+                const VisibleObject &source =
                     inObservation.nearbyObjects[i];
 
-                if( candidate.distance <= inMinDistance ) {
+                if( source.requiredToolID > 0 &&
+                    source.toolFoodResultID > 0 &&
+                    ( plan.source == NULL ||
+                      source.distance < plan.source->distance ) ) {
+                    plan.source = &source;
+                }
+            }
+
+            if( plan.source == NULL ) {
+                return plan;
+            }
+
+            for( size_t i=0; i<inObservation.nearbyObjects.size(); i++ ) {
+                const VisibleObject &tool =
+                    inObservation.nearbyObjects[i];
+
+                if( tool.objectID == plan.source->requiredToolID &&
+                    tool.pickupable &&
+                    ( plan.tool == NULL ||
+                      tool.distance < plan.tool->distance ) ) {
+                    plan.tool = &tool;
+                }
+            }
+
+            return plan;
+        }
+
+        const VisibleObject *findWanderTarget(
+            const AgentObservation &inObservation ) const {
+            const VisibleObject *best = NULL;
+
+            for( size_t i=0; i<inObservation.nearbyObjects.size(); i++ ) {
+                const VisibleObject &o = inObservation.nearbyObjects[i];
+
+                if( o.distance <= 2 ) {
                     continue;
                 }
 
-                if( nearest == NULL ||
-                    candidate.distance < nearest->distance ) {
-                    nearest = &candidate;
+                if( o.x == mLastTargetX && o.y == mLastTargetY &&
+                    inObservation.currentTime - mLastActionTime < 5.0 ) {
+                    continue;
+                }
+
+                if( best == NULL || o.distance < best->distance ) {
+                    best = &o;
                 }
             }
-
-            return nearest;
+            return best;
         }
 
+        const char *actionName( AgentActionType inType ) const {
+            switch( inType ) {
+                case AgentActionType::MOVE_TO: return "MOVE_TO";
+                case AgentActionType::INTERACT: return "INTERACT";
+                case AgentActionType::EAT: return "EAT";
+                case AgentActionType::DROP: return "DROP";
+                default: return "NONE";
+            }
+        }
 
         void printDebug( const AgentObservation &inObservation ) {
-
             if( inObservation.currentTime < mNextDebugTime ) {
                 return;
             }
 
-            printf(
-                "AGENT STATE: "
-                "x=%d y=%d "
-                "age=%.2f "
-                "food=%d/%d "
-                "holding=%d "
-                "moving=%d "
-                "visibleObjects=%zu\n",
+            std::printf(
+                "AGENT STATE: x=%d y=%d age=%.2f food=%d/%d "
+                "holding=%d heldFood=%d moving=%d visible=%zu\n",
                 inObservation.x,
                 inObservation.y,
                 inObservation.age,
                 inObservation.foodStore,
                 inObservation.foodCapacity,
                 inObservation.heldObjectID,
+                inObservation.heldObjectFoodValue,
                 inObservation.inMotion ? 1 : 0,
                 inObservation.nearbyObjects.size() );
 
-            if( inObservation.nearbyObjects.empty() ) {
-                printf( "AGENT TARGET: none\n" );
-            }
-            else {
-                const VisibleObject *nearest =
-                    findNearest( inObservation );
-
-                printf(
-                    "AGENT TARGET: id=%d x=%d y=%d distance=%d\n",
-                    nearest->objectID,
-                    nearest->x,
-                    nearest->y,
-                    nearest->distance );
-            }
-
-            mNextDebugTime =
-                inObservation.currentTime + 3.0;
+            mNextDebugTime = inObservation.currentTime + 3.0;
         }
 };
-
 
 #endif
