@@ -8,9 +8,9 @@
 #include "whiteSprites.h"
 #include "message.h"
 #include "groundSprites.h"
-
+#include "ai/BasicAgent.h"
 #include "accountHmac.h"
-
+#include <string>
 #include "liveObjectSet.h"
 #include "ageControl.h"
 #include "musicPlayer.h"
@@ -13370,7 +13370,7 @@ static const char *badgeColors[NUM_BADGE_COLORS] = { "#e6194B",
 
 
 static char justHitTab = false;
-
+static BasicAgent basicAgent;
         
 void LivingLifePage::step() {
     
@@ -13378,7 +13378,113 @@ void LivingLifePage::step() {
         return;
         }
     
+    LiveObject *agentLiveObject = getOurLiveObject();
 
+    if( mFirstServerMessagesReceived &&
+        agentLiveObject != NULL ) {
+
+        AgentObservation observation;
+
+        observation.x =
+            (int)agentLiveObject->xd;
+
+        observation.y =
+            (int)agentLiveObject->yd;
+
+        observation.heldObjectID =
+            agentLiveObject->holdingID;
+
+        observation.foodStore =
+            agentLiveObject->foodStore;
+
+        observation.foodCapacity =
+            agentLiveObject->foodCapacity;
+
+        observation.maxFoodStore =
+            agentLiveObject->maxFoodStore;
+
+        observation.maxFoodCapacity =
+            agentLiveObject->maxFoodCapacity;
+
+        observation.age =
+            computeCurrentAge( agentLiveObject );
+
+        observation.currentTime =
+            game_getCurrentTime();
+
+        observation.inMotion =
+            agentLiveObject->inMotion;
+        const int perceptionRadius = 15;
+
+        for( int offsetY = -perceptionRadius;
+             offsetY <= perceptionRadius;
+             offsetY++ ) {
+
+            for( int offsetX = -perceptionRadius;
+                 offsetX <= perceptionRadius;
+                 offsetX++ ) {
+
+                int worldX =
+                    observation.x + offsetX;
+
+                int worldY =
+                    observation.y + offsetY;
+
+                int mapIndex =
+                    getMapIndex( worldX, worldY );
+
+                if( mapIndex < 0 ) {
+                    continue;
+                }
+
+                int objectID =
+                    mMap[ mapIndex ];
+
+                if( objectID <= 0 ) {
+                    continue;
+                }
+
+                VisibleObject visibleObject;
+
+                visibleObject.objectID =
+                    objectID;
+
+                visibleObject.x =
+                    worldX;
+
+                visibleObject.y =
+                    worldY;
+
+                visibleObject.distance =
+                    abs( offsetX ) + abs( offsetY );
+
+                observation.nearbyObjects.push_back(
+                    visibleObject );
+            }
+        }
+        basicAgent.observe( observation );
+        AgentAction action = basicAgent.decide( observation );
+
+        if( action.type == AgentActionType::MOVE_TO &&
+            ! agentLiveObject->inMotion &&
+            ! playerActionPending &&
+            computeCurrentAgeNoOverride( agentLiveObject ) >= noMoveAge ) {
+
+            mForceGroundClick = true;
+            pointerDown( action.targetX * CELL_D, action.targetY * CELL_D );
+            pointerUp( action.targetX * CELL_D, action.targetY * CELL_D );
+            mForceGroundClick = false;
+            }
+
+
+
+
+
+
+
+
+
+    }
     if( apocalypseInProgress && apocalypseDisplayProgress < 1.0 ) {
         double stepSize = frameRateFactor / ( apocalypseDisplaySeconds * 60.0 );
         apocalypseDisplayProgress += stepSize;
