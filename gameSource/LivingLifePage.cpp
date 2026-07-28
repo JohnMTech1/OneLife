@@ -13371,6 +13371,11 @@ static const char *badgeColors[NUM_BADGE_COLORS] = { "#e6194B",
 
 static char justHitTab = false;
 static BasicAgent basicAgent;
+// A synthetic INTERACT click is queued before playerActionPending becomes
+// visible to this loop.  Without this separate lock, the agent can choose a
+// movement action on the next frame and interrupt the interaction.
+static double basicAgentInteractionLockUntil = 0;
+static int basicAgentHoldingBeforeInteraction = 0;
         
 void LivingLifePage::step() {
     
@@ -13391,8 +13396,11 @@ void LivingLifePage::step() {
         observation.y =
             (int)agentLiveObject->yd;
 
+        // During sickness, holdingID is the sickness/wound display object
+        // (for example, 1363 Bite Wound), not an item carried in the hand.
+        // Treat the hand as empty so the agent does not try to drop a wound.
         observation.heldObjectID =
-            agentLiveObject->holdingID;
+            isSick( agentLiveObject ) ? 0 : agentLiveObject->holdingID;
 
         observation.heldObjectFoodValue = 0;
         if( observation.heldObjectID > 0 ) {
@@ -13548,32 +13556,126 @@ void LivingLifePage::step() {
             }
         }
         basicAgent.observe( observation );
-        AgentAction action = basicAgent.decide( observation );
 
-        if( !agentLiveObject->inMotion &&
-            !playerActionPending &&
-            computeCurrentAgeNoOverride( agentLiveObject ) >= noMoveAge ) {
+        double agentTime = game_getCurrentTime();
+        if( basicAgentInteractionLockUntil > agentTime &&
+            agentLiveObject->holdingID !=
+                basicAgentHoldingBeforeInteraction ) {
+            // The server confirmed the interaction through an inventory
+            // change, so no further delay is needed.
+            basicAgentInteractionLockUntil = 0;
+            }
 
-            if( action.type == AgentActionType::MOVE_TO ) {
-                mForceGroundClick = true;
-                pointerDown( action.targetX * CELL_D,
-                             action.targetY * CELL_D );
-                pointerUp( action.targetX * CELL_D,
-                           action.targetY * CELL_D );
-                mForceGroundClick = false;
-                }
-            else if( action.type == AgentActionType::INTERACT ||
-                     action.type == AgentActionType::DROP ) {
-                pointerDown( action.targetX * CELL_D,
-                             action.targetY * CELL_D );
-                pointerUp( action.targetX * CELL_D,
-                           action.targetY * CELL_D );
-                }
-            else if( action.type == AgentActionType::EAT ) {
-                pointerDown( observation.x * CELL_D,
-                             observation.y * CELL_D );
-                pointerUp( observation.x * CELL_D,
-                           observation.y * CELL_D );
+        if( agentTime >= basicAgentInteractionLockUntil ) {
+            AgentAction action = basicAgent.decide( observation );
+
+            if( !agentLiveObject->inMotion &&
+                !playerActionPending &&
+                computeCurrentAgeNoOverride( agentLiveObject ) >= noMoveAge ) {
+
+                if( action.type == AgentActionType::MOVE_TO ) {
+                    mForceGroundClick = true;
+                    pointerDown( action.targetX * CELL_D,
+                                 action.targetY * CELL_D );
+                    pointerUp( action.targetX * CELL_D,
+                               action.targetY * CELL_D );
+                    mForceGroundClick = false;
+                    }
+                else if( action.type == AgentActionType::INTERACT ) {
+                    int targetMapX =
+                        action.targetX - mMapOffsetX + mMapD / 2;
+                    int targetMapY =
+                        action.targetY - mMapOffsetY + mMapD / 2;
+
+                    // Synthetic clicks at tile centers can miss the opaque
+                    // pixels of a small object (such as Stone 33), turning an
+                    // intended interaction into a ground click.  Queue the
+                    // same protocol-level USE produced by a successful normal
+                    // left click, including the currently observed object ID
+                    // so stale targets are rejected safely by the server.
+                    if( targetMapX >= 0 && targetMapX < mMapD &&
+                        targetMapY >= 0 && targetMapY < mMapD ) {
+
+                        int targetID =
+                            mMap[ targetMapY * mMapD + targetMapX ];
+
+                        if( targetID > 0 ) {
+                            if( nextActionMessageToSend != NULL ) {
+                                delete [] nextActionMessageToSend;
+                                }
+
+                            nextActionMessageToSend =
+                                autoSprintf( "USE %d %d %d#",
+                                    sendX( action.targetX ),
+                                    sendY( action.targetY ),
+                                    targetID );
+
+                            nextActionEating = false;
+                            nextActionDropping = false;
+                            playerActionTargetX = action.targetX;
+                            playerActionTargetY = action.targetY;
+                            playerActionTargetNotAdjacent = false;
+                            agentLiveObject->actionTargetX = action.targetX;
+                            agentLiveObject->actionTargetY = action.targetY;
+                            agentLiveObject->actionTargetTweakX = 0;
+                            agentLiveObject->actionTargetTweakY = 0;
+
+                            basicAgentHoldingBeforeInteraction =
+                                agentLiveObject->holdingID;
+                            basicAgentInteractionLockUntil =
+                                agentTime + 2.0;
+
+                            printf( "AGENT DIRECT INTERACT: USE x=%d y=%d "
+                                    "targetID=%d holding=%d\n",
+                                    action.targetX, action.targetY,
+                                    targetID,
+                                    agentLiveObject->holdingID );
+                            }
+                        else {
+                            printf( "AGENT INTERACT CANCELLED: empty target "
+                                    "x=%d y=%d\n",
+                                    action.targetX, action.targetY );
+                            }
+                        }
+                    else {
+                        printf( "AGENT INTERACT CANCELLED: target outside "
+                                "map x=%d y=%d\n",
+                                action.targetX, action.targetY );
+                        }
+                    }
+                else if( action.type == AgentActionType::DROP ) {
+                    if( nextActionMessageToSend != NULL ) {
+                        delete [] nextActionMessageToSend;
+                        }
+
+                    nextActionMessageToSend =
+                        autoSprintf( "DROP %d %d -1#",
+                                     sendX( action.targetX ),
+                                     sendY( action.targetY ) );
+
+                    nextActionEating = false;
+                    nextActionDropping = true;
+                    playerActionTargetX = action.targetX;
+                    playerActionTargetY = action.targetY;
+                    playerActionTargetNotAdjacent = false;
+                    }
+                else if( action.type == AgentActionType::EAT ) {
+                    // Queue the protocol-level use-on-self action directly.
+                    // A synthetic tile-center click can miss the player's
+                    // non-transparent sprite pixels and never become SELF.
+                    if( nextActionMessageToSend != NULL ) {
+                        delete [] nextActionMessageToSend;
+                        }
+                    nextActionMessageToSend =
+                        autoSprintf( "SELF %d %d -1#",
+                                     sendX( observation.x ),
+                                     sendY( observation.y ) );
+                    nextActionEating = true;
+                    nextActionDropping = false;
+                    playerActionTargetX = observation.x;
+                    playerActionTargetY = observation.y;
+                    playerActionTargetNotAdjacent = false;
+                    }
                 }
             }
 
