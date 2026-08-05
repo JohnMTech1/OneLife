@@ -28,3 +28,8 @@ server/lifeLog/
 server/categories
 server/objects
 server/transitions
+
+# Local OHOL server installation repositories
+/server/installYourOwnServer/OneLife/
+/server/installYourOwnServer/OneLifeData7/
+/server/installYourOwnServer/minorGems/
