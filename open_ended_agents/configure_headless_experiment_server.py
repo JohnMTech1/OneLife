@@ -9,9 +9,9 @@ import shutil
 import sys
 
 
-MARKER = "M10_EXPERIMENT_MODE"
-PREVIOUS_MARKER = "M9_EXPERIMENT_MODE"
-OLD_MARKER = "M8_HEADLESS_EXPERIMENT_MODE"
+MARKER = "M11_MORTAL_HEADLESS_EXPERIMENT_MODE"
+PREVIOUS_MARKER = "M10_EXPERIMENT_MODE"
+OLD_MARKERS = ("M9_EXPERIMENT_MODE", "M8_HEADLESS_EXPERIMENT_MODE")
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -28,7 +28,7 @@ def clean_source_for_upgrade(source: Path) -> str:
     current = source.read_text(encoding="utf-8")
     if MARKER in current:
         return current
-    if OLD_MARKER not in current and PREVIOUS_MARKER not in current:
+    if not any(marker in current for marker in (*OLD_MARKERS, PREVIOUS_MARKER)):
         return current
 
     # M9's .pre-m9 file can itself contain the earlier M8 patch.  Prefer the
@@ -37,12 +37,14 @@ def clean_source_for_upgrade(source: Path) -> str:
     candidates = [
         source.with_suffix(source.suffix + ".pre-m8"),
         source.with_suffix(source.suffix + ".pre-m9"),
+        source.with_suffix(source.suffix + ".pre-m10"),
     ]
     old_backup = next(
         (
             candidate for candidate in candidates
             if candidate.is_file()
-            and OLD_MARKER not in candidate.read_text(encoding="utf-8")
+            and not any(marker in candidate.read_text(encoding="utf-8")
+                        for marker in OLD_MARKERS)
             and PREVIOUS_MARKER not in candidate.read_text(encoding="utf-8")
             and MARKER not in candidate.read_text(encoding="utf-8")
         ),
@@ -55,7 +57,7 @@ def clean_source_for_upgrade(source: Path) -> str:
             "server.cpp before running M10."
         )
     clean = old_backup.read_text(encoding="utf-8")
-    if OLD_MARKER in clean or PREVIOUS_MARKER in clean or MARKER in clean:
+    if any(marker in clean for marker in (*OLD_MARKERS, PREVIOUS_MARKER, MARKER)):
         raise RuntimeError(f"The {old_backup.name} backup is not clean.")
     return clean
 
@@ -111,8 +113,7 @@ def patch_server(source: Path) -> Path:
         "static char isImmortalObserver( LiveObject *inPlayer );\n\n\n"
         + age_anchor
         + "\n"
-        "    if( ( isHeadlessExperimentAgent( inPlayer ) ||\n"
-        "          isImmortalObserver( inPlayer ) ) &&\n"
+        "    if( isImmortalObserver( inPlayer ) &&\n"
         "        age >= forceDeathAge ) {\n"
         "        return forceDeathAge - 0.001;\n"
         "        }\n"
@@ -124,9 +125,9 @@ def patch_server(source: Path) -> Path:
         "                curTime >= nextPlayer->dyingETA ) {\n"
     )
     harm_replacement = (
-        "            // Keep active experiment avatars out of lethal states.\n"
-        "            if( ( isHeadlessExperimentAgent( nextPlayer ) ||\n"
-        "                  isImmortalObserver( nextPlayer ) ) &&\n"
+        "            // Only the graphical observer is immortal.  Headless\n"
+        "            // agents must experience ordinary injury and death.\n"
+        "            if( isImmortalObserver( nextPlayer ) &&\n"
         "                nextPlayer->connected &&\n"
         "                ( nextPlayer->error || nextPlayer->dying ) ) {\n"
         "                nextPlayer->error = false;\n"
@@ -173,24 +174,6 @@ def patch_server(source: Path) -> Path:
         "observer food-timer guard"
     )
 
-    hunger_anchor = (
-        "                    if( decrementedPlayer != NULL &&\n"
-        "                        decrementedPlayer->foodStore < 0 ) {\n"
-    )
-    hunger_replacement = (
-        "                    // Headless hunger remains observable but cannot\n"
-        "                    // kill the active experimental learner.\n"
-        "                    if( decrementedPlayer != NULL &&\n"
-        "                        decrementedPlayer->foodStore < 0 &&\n"
-        "                        isHeadlessExperimentAgent( decrementedPlayer ) ) {\n"
-        "                        decrementedPlayer->foodStore = 0;\n"
-        "                        decrementedPlayer->updateGlobal = true;\n"
-        "                        decrementedPlayer = NULL;\n"
-        "                        }\n\n"
-        + hunger_anchor
-    )
-    text = replace_once(text, hunger_anchor, hunger_replacement, "starvation guard")
-
     delete_eta_anchor = (
         "                nextPlayer->deleteSentDoneETA = Time::getCurrentTime() + 10;\n"
     )
@@ -216,7 +199,7 @@ def patch_server(source: Path) -> Path:
         text, trigger_anchor, trigger_replacement, "headless trigger bypass"
     )
 
-    backup = source.with_suffix(source.suffix + ".pre-m9")
+    backup = source.with_suffix(source.suffix + ".pre-m11")
     if not backup.exists():
         backup.write_text(original_on_disk, encoding="utf-8")
         shutil.copystat(source, backup)

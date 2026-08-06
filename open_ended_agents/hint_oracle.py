@@ -70,20 +70,21 @@ class HintOracle:
         return text
 
     def word_from_description(self, object_id: int) -> str:
-        """A single pronounceable token drawn from the description.
+        """Return the complete visible label as a stable language token.
 
-        Players say "stone", not "SHARP STONE #2".  Taking the last word
-        keeps names short enough for the game's speech limits while
-        staying the same word every agent would read.
+        The earlier implementation kept only one word (for example STONE
+        from SHARP STONE), which collapsed distinct in-game objects back
+        into an invented vocabulary.  Underscores preserve the complete
+        human-visible name while keeping it a single token for the agent's
+        existing speech grammar.
         """
         text = self.description(object_id)
         if not text:
             return ""
-        words = re.findall(r"[A-Za-z]+", text.upper())
+        words = re.findall(r"[A-Za-z0-9]+", text.upper())
         if not words:
             return ""
-        word = words[-1] if len(words[-1]) >= 3 else words[0]
-        return word[:8]
+        return "_".join(words)[:80]
 
     # ---- transitions, as shown on click ----
 

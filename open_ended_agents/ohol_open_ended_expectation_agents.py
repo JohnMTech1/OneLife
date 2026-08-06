@@ -3040,6 +3040,31 @@ class AgentSession(threading.Thread):
     def propose_actions(self, me: PlayerView, now: float) -> list[ActionProposal]:
         """Generate available primitive actions; learned evidence supplies scores."""
         proposals: list[ActionProposal] = []
+
+        # Hovering exposes names without consuming an action, just as it does
+        # for a graphical player.  Opening the combination menu is different:
+        # it is represented below by a one-time INSPECT action.
+        if self.hints.available:
+            visible_objects = [me.held_object] + [
+                oid for pos, oid in self.world.items()
+                if oid > 0
+                and abs(pos[0] - me.x) + abs(pos[1] - me.y) <= 3
+            ]
+            for object_id in visible_objects:
+                if object_id <= 0:
+                    continue
+                label = self.hints.word_from_description(object_id)
+                if label:
+                    self.mind.hint_words[object_id] = label
+            if self.hints.level == "full":
+                for object_id in dict.fromkeys(visible_objects):
+                    if object_id > 0 and object_id not in self.consulted_hints:
+                        proposals.append(ActionProposal(
+                            "INSPECT", 5.5,
+                            f"open the in-game hint menu for {object_id}",
+                            target_id=object_id,
+                        ))
+            self.mind.save()
         probe = self._stuck_probe(me, now)
         if probe is not None:
             proposals.append(probe)
@@ -3615,55 +3640,6 @@ class AgentSession(threading.Thread):
                     ))
                     break
 
-        # Consult the game's hints for what is in hand or in sight, the
-        # way a player hovers and clicks.  Descriptions give shared
-        # names; transitions arrive as claims from the hint sheet, so
-        # they still pass through verification like any other testimony.
-        if self.hints.available:
-            to_read = [me.held_object] + [
-                oid for pos, oid in self.world.items()
-                if oid > 0
-                and abs(pos[0] - me.x) + abs(pos[1] - me.y) <= 3
-            ]
-            for object_id in to_read[:8]:
-                if object_id <= 0 or object_id in self.consulted_hints:
-                    continue
-                self.consulted_hints.add(object_id)
-                word = self.hints.word_from_description(object_id)
-                if word and object_id not in self.mind.object_words:
-                    self.mind.hint_words[object_id] = word
-                    self.mind.save()
-                for actor, target, new_actor, new_target in \
-                        self.hints.hints_for(object_id):
-                    if target <= 0:
-                        continue
-                    result = new_actor if new_actor > 0 else new_target
-                    if result <= 0:
-                        continue
-                    self.mind.hear_rule_testimony(
-                        max(0, actor), target, result, HINT_SOURCE_ID
-                    )
-                    actor_token = (
-                        "HAND" if actor <= 0
-                        else self.mind.word_for_object(actor)[0]
-                    )
-                    self.mind.hear_token_rule(
-                        actor_token,
-                        self.mind.word_for_object(target)[0],
-                        self.mind.word_for_object(result)[0],
-                        HINT_SOURCE_ID,
-                    )
-                if self.hints.level == "full":
-                    count = len(self.hints.hints_for(object_id))
-                    if count:
-                        self.record_event(
-                            "hints_read", object_id=object_id, count=count
-                        )
-                        self.log(
-                            f"read {count} hint(s) for object {object_id}"
-                            + (f" ({word})" if word else "")
-                        )
-
         # Goal-directed reasoning (M28): work backward from a
         # wanted state to something worth doing right now.
         self.goal_proposals(me, now, hunger, proposals)
@@ -4020,6 +3996,60 @@ class AgentSession(threading.Thread):
                         break
                         break
         return proposals
+
+    def inspect_object_hints(self, object_id: int) -> int:
+        """Open one object's human-visible hint menu and retain its entries."""
+        if (
+            self.hints.level != "full" or object_id <= 0
+            or object_id in self.consulted_hints
+        ):
+            return 0
+        transitions = self.hints.hints_for(object_id)
+        self.consulted_hints.add(object_id)
+        for actor, target, new_actor, new_target in transitions:
+            # Hover labels are available for every object displayed in the
+            # menu, not merely the originally clicked object.
+            for related in (actor, target, new_actor, new_target):
+                if related > 0:
+                    label = self.hints.word_from_description(related)
+                    if label:
+                        self.mind.hint_words[related] = label
+
+            actor_token = (
+                "HAND" if actor <= 0 else self.mind.word_for_object(actor)[0]
+            )
+            target_token = (
+                "SELF" if target == -1
+                else self.mind.word_for_object(target)[0]
+            )
+            positive_outputs = list(dict.fromkeys(
+                result for result in (new_actor, new_target) if result > 0
+            ))
+            # The existing causal planner has one predicted result per rule;
+            # use the held result as its primary prediction, while recording
+            # every displayed output in the event so the hint is not lost.
+            if positive_outputs:
+                self.mind.hear_rule_testimony(
+                    max(0, actor), target, positive_outputs[0], HINT_SOURCE_ID
+                )
+                for result in positive_outputs:
+                    self.mind.hear_token_rule(
+                        actor_token, target_token,
+                        self.mind.word_for_object(result)[0], HINT_SOURCE_ID,
+                    )
+            self.record_event(
+                "hint_transition", clicked_object=object_id,
+                actor=actor, target=target,
+                new_actor=new_actor, new_target=new_target,
+            )
+        self.mind.save()
+        self.record_event(
+            "hints_read", object_id=object_id, count=len(transitions)
+        )
+        self.log(
+            f"inspected {object_id}; read {len(transitions)} hint(s)"
+        )
+        return len(transitions)
 
     def autonomy_step(self, sock: socket.socket, now: float) -> bool:
         me = self.players.get(self.our_id) if self.our_id else None
@@ -4557,7 +4587,10 @@ class AgentSession(threading.Thread):
         self.log(
             f"chose {chosen.kind} score={chosen.score:.2f}: {chosen.reason}"
         )
-        if chosen.kind in (
+        if chosen.kind == "INSPECT":
+            self.inspect_object_hints(chosen.target_id)
+            acted = True
+        elif chosen.kind in (
             "MOVE", "ROAM", "DISPERSE", "WANDER", "DELIVER", "RETURN_HOME",
             "SEEK_CACHE", "PROBE", "APPROACH_WARMTH", "SEEK_LEAD", "RETREAT",
             "FOLLOW",
@@ -5381,7 +5414,7 @@ def parse_args() -> argparse.Namespace:
              "trying to make one.",
     )
     parser.add_argument(
-        "--hints", choices=("off", "names", "full"), default="off",
+        "--hints", choices=("off", "names", "full"), default="full",
         help="How much of the game's own hint system the agents "
              "may use, as a player does: 'names' gives object "
              "descriptions on sight, 'full' adds the transition "

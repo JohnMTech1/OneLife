@@ -5,6 +5,8 @@ import threading
 import zlib
 from pathlib import Path
 
+from hint_oracle import HintOracle
+
 from ohol_open_ended_expectation_agents import (
     AgentSession,
     MapChunk,
@@ -68,6 +70,25 @@ def args(memory_dir: str) -> argparse.Namespace:
 
 
 def main() -> None:
+    # Human-equivalent names preserve the complete hover label, and hints
+    # include self-use plus both transition outputs.
+    with tempfile.TemporaryDirectory() as data_directory:
+        data = Path(data_directory)
+        (data / "objects").mkdir()
+        (data / "transitions").mkdir()
+        for object_id, label in {
+            34: "Sharp Stone", 35: "Stone Chips", 36: "Cut Plant",
+        }.items():
+            (data / "objects" / f"{object_id}.txt").write_text(
+                f"id={object_id}\n{label}#variant\n", encoding="utf-8"
+            )
+        (data / "transitions" / "34_-1.txt").write_text(
+            "35 36\n", encoding="utf-8"
+        )
+        oracle = HintOracle(data, "full")
+        assert oracle.word_from_description(34) == "SHARP_STONE"
+        assert oracle.hints_for(34) == [(34, -1, 35, 36)]
+
     updates = parse_player_updates(
         "PU\n" + pu_line(10, 34, 0, 0) + "\n" + pu_line(11, 0, 2, 1)
     )
@@ -169,6 +190,33 @@ def main() -> None:
             (0, 1): 0, (0, -1): 0,
         }
         session.mind = mind
+
+        # Hovering learns the shared in-game name, while recipe access is an
+        # explicit inspect/click action and is not injected passively.
+        live_data = Path(directory) / "data"
+        (live_data / "objects").mkdir(parents=True)
+        (live_data / "transitions").mkdir()
+        for object_id, label in {
+            34: "Sharp Stone", 35: "Stone Chips", 36: "Cut Plant",
+        }.items():
+            (live_data / "objects" / f"{object_id}.txt").write_text(
+                f"id={object_id}\n{label}\n", encoding="utf-8"
+            )
+        (live_data / "transitions" / "34_-1.txt").write_text(
+            "35 36\n", encoding="utf-8"
+        )
+        session.hints = HintOracle(live_data, "full")
+        session.consulted_hints.clear()
+        proposals = session.propose_actions(updates[0], 99.9)
+        assert session.mind.hint_words[34] == "SHARP_STONE"
+        assert any(p.kind == "INSPECT" and p.target_id == 34 for p in proposals)
+        assert 34 not in session.consulted_hints
+        assert session.inspect_object_hints(34) == 1
+        assert 34 in session.consulted_hints
+        assert session.mind.hint_words[35] == "STONE_CHIPS"
+        assert session.mind.hint_words[36] == "CUT_PLANT"
+        assert "34|-1" in session.mind.rule_testimony
+
 
         # A destination claimed by another runner is unavailable until its
         # short reservation expires.
