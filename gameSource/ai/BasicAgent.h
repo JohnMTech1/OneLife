@@ -45,6 +45,8 @@ struct AgentAction {
     int targetY;
 };
 
+#include "AgentEventLogger.h"
+
 class BasicAgent {
     public:
         BasicAgent()
@@ -94,6 +96,8 @@ class BasicAgent {
             if( !mEnabled ) {
                 return none;
             }
+
+                mEventLogger.observe( inObservation );
 
                 printDebug( inObservation );
                 updateFoodSourceOutcome( inObservation );
@@ -278,6 +282,7 @@ class BasicAgent {
 
         void observe( const AgentObservation &inObservation ) {
             if( mEnabled ) {
+                mEventLogger.observe( inObservation );
                 printDebug( inObservation );
             }
         }
@@ -323,6 +328,7 @@ class BasicAgent {
             mBaseCandidateY = 0;
             mBaseCandidateScore = -100000;
             mBaseCandidateObservations = 0;
+            mEventLogger.reset();
         }
 
     private:
@@ -391,6 +397,7 @@ class BasicAgent {
         int mBaseCandidateY;
         int mBaseCandidateScore;
         int mBaseCandidateObservations;
+        AgentEventLogger mEventLogger;
 
         AgentAction makeAction(
             AgentActionType inType, int inX, int inY ) const {
@@ -410,6 +417,13 @@ class BasicAgent {
             mLastActionTime = inTime;
             mLastTargetX = inX;
             mLastTargetY = inY;
+
+            mEventLogger.action(
+                inType,
+                inX,
+                inY,
+                inTime,
+                inReason );
 
             std::printf(
                 "AGENT ACTION: %s x=%d y=%d reason=%s\n",
